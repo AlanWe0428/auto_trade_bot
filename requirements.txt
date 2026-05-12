@@ -1,5 +1,6 @@
 streamlit
 google-generativeai
-pandas
+pandas==1.5.3
+numpy==1.23.5
 pandas-ta
 yfinance

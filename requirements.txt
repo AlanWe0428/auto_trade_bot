@@ -1,4 +1,5 @@
 streamlit
 google-generativeai
 yfinance
-pandas-ta
+pandas-ta==0.3.14b0
+pandas<2.0.0

@@ -1,4 +1,6 @@
 streamlit
 google-generativeai
-yfinance
+pandas
 pandas-ta
+yfinance
+python-binance

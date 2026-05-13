@@ -20,7 +20,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. 幣安核心功能模組 (強化版) ---
+# --- 2. 幣安核心功能模組 ---
 def get_binance_client():
     try:
         api_key = st.secrets.get("BINANCE_API_KEY")
@@ -33,54 +33,45 @@ def get_futures_balance():
     client = get_binance_client()
     if not client: return 0.0
     try:
-        # 確保抓取的是 U 本位合約帳戶
         balance = client.futures_account_balance()
         for asset in balance:
             if asset['asset'] == 'USDT':
                 return float(asset['withdrawAvailable'])
         return 0.0
-    except Exception as e:
-        st.sidebar.error(f"餘額讀取異常: {e}")
-        return 0.0
+    except: return 0.0
 
 def place_futures_order(symbol, side, leverage, usdt_amount, price, tp_price=None, sl_price=None):
     client = get_binance_client()
     if not client: return None
     try:
-        # 1. 設定槓桿
         client.futures_change_leverage(symbol=symbol, leverage=leverage)
-        
-        # 2. 計算數量 (Qty = 保證金 * 槓桿 / 價格)
         qty = round((usdt_amount * leverage) / price, 3) 
         
-        # 3. 主訂單 (限價單)
+        # 1. 主限價單
         main_order = client.futures_create_order(
             symbol=symbol, side=side, type=ORDER_TYPE_LIMIT,
             timeInForce=TIME_IN_FORCE_GTC, quantity=qty, price=str(round(price, 4))
         )
-        
-        # 4. 止盈單 (Take Profit)
+        # 2. 止盈單
         if tp_price and tp_price > 0:
             tp_side = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
             client.futures_create_order(
                 symbol=symbol, side=tp_side, type=FUTURE_ORDER_TYPE_TAKE_PROFIT_MARKET,
                 stopPrice=str(round(tp_price, 4)), closePosition=True
             )
-            
-        # 5. 止損單 (Stop Loss)
+        # 3. 止損單
         if sl_price and sl_price > 0:
             sl_side = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
             client.futures_create_order(
                 symbol=symbol, side=sl_side, type=FUTURE_ORDER_TYPE_STOP_MARKET,
                 stopPrice=str(round(sl_price, 4)), closePosition=True
             )
-            
         return main_order
     except Exception as e:
         st.error(f"❌ 幣安下單失敗: {str(e)}")
         return None
 
-# --- 3. 核心數據處理 (完整保留原版指標) ---
+# --- 3. 核心數據處理 (完整還原原版) ---
 def get_crypto_data(coin_symbol):
     try:
         ticker = f"{coin_symbol}-USD"
@@ -112,19 +103,27 @@ def get_sniper_prompt(all_tech_data, indicators):
     indicator_text = "、".join(indicators) if indicators else "綜合技術指標"
     data_content = ""
     for coin, d in all_tech_data.items():
-        data_content += f"【{coin}】現價:{d['price']:.2f}, RSI:{d['rsi']:.1f}, ATR:{d['atr']:.2f}, 7D支撐:{d['sup_7d']:.2f}\n"
-    return f"""你是一位精通 ICT 與 SMC 的「短線狙擊交易員」。分析手法：{indicator_text}。
-    數據：{data_content}
-    請嚴格按此格式輸出：
+        data_content += f"【{coin}】現價:{d['price']:.2f} ({d['change']:.2f}%), RSI:{d['rsi']:.1f}, ATR波动:{d['atr']:.2f}, 7D支撐:{d['sup_7d']:.2f}, 趨勢:[{d['price_trend']}]\n"
+    return f"""
+    你是一位精通 ICT 策略與 SMC 核心的「短線狙擊交易員」。
+    請利用以下手法進行【匯流分析】：【{indicator_text}】。
+    分析邏輯：
+    1. **FVG 辨識**：根據序列找出價格失衡區。
+    2. **匯流(Confluence)**：尋找價格回補 FVG 且觸及 0.618 斐波那契位的重疊區。
+    3. **風控**：以 ATR 的 1.5-2 倍設定止損。
+    4. **情緒**：判斷 RSI 是否與價格存在背離。
+
+    請輸出格式：
     💎 **[幣種] 短線狙擊報告**
     ● **匯流辨識**：[描述]
-    ● **策略評級**：[⭐ 強勢狙擊 / ✅ 觀察等待 / ❌ 放棄]
+    ● **策略評級**：[評分]
     ● **掛單區間**：進場 [數值] | 止盈 [數值] | 止損 [數值]
     ● **核心理由**：[內容]
     ---
-    🏆 **今日最優狙擊機會**：[幣種名稱]"""
+    🏆 **今日最優狙擊機會**：[幣種]
+    """
 
-# --- 4. 側邊欄 (保留 6 個選項) ---
+# --- 4. 側邊欄 (還原 6 個選項) ---
 with st.sidebar:
     st.header("🎯 狙擊手控制台")
     api_key = st.secrets.get("GEMINI_API_KEY") or st.text_input("Gemini API Key", type="password")
@@ -153,21 +152,31 @@ if st.button("🚀 開始掃描短線狙擊機會"):
     else:
         try:
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel("models/gemini-1.5-flash")
+            
+            # --- 關鍵：完全還原您原本成功的模型偵測連線邏輯 ---
+            available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+            target_model = "models/gemini-1.5-flash"
+            if target_model not in available_models:
+                if "models/gemini-flash-latest" in available_models:
+                    target_model = "models/gemini-flash-latest"
+                else:
+                    target_model = available_models[0] if available_models else "gemini-1.5-flash"
+            
+            model = genai.GenerativeModel(target_model)
             all_data = {}
             p_bar = st.progress(0)
             for i, coin in enumerate(selected_coins):
                 p_bar.progress((i+1)/len(selected_coins))
                 res = get_crypto_data(coin)
                 if res: all_data[coin] = res
-                time.sleep(0.5)
+                time.sleep(1)
 
             if all_data:
                 response = model.generate_content(get_sniper_prompt(all_data, indicators))
                 st.info(response.text)
                 st.session_state.setdefault("messages", []).append({"role":"assistant", "content": response.text})
                 
-                # --- 強化版自動抓取點位 ---
+                # --- 自動解析點位 ---
                 text = response.text
                 p_match = re.search(r"進場\s*\[?([\d\.]+)", text)
                 tp_match = re.search(r"止盈\s*\[?([\d\.]+)", text)
@@ -178,10 +187,10 @@ if st.button("🚀 開始掃描短線狙擊機會"):
                 if tp_match: st.session_state.last_analysis["tp"] = float(tp_match.group(1))
                 if sl_match: st.session_state.last_analysis["sl"] = float(sl_match.group(1))
                 if c_match: st.session_state.last_analysis["symbol"] = c_match.group(1).upper() + "USDT"
-                st.rerun() # 強制刷新介面以顯示抓取到的點位
+                st.rerun() # 確保介面同步更新點位
         except Exception as e: st.error(f"分析失敗: {e}")
 
-# --- 6. 幣安下單面板 (新增止盈止損) ---
+# --- 6. 幣安下單面板 ---
 st.divider()
 st.subheader("🤖 快速執行幣安合約下單")
 usdt_balance = get_futures_balance()
@@ -211,11 +220,22 @@ with st.container(border=True):
         elif input_usdt > usdt_balance: st.error("餘額不足")
         else:
             final_side = SIDE_BUY if "BUY" in side_opt else SIDE_SELL
-            with st.spinner("正在執行複合訂單..."):
-                res = place_futures_order(trade_symbol, final_side, leverage, input_usdt, trade_price, tp_input, sl_input)
-                if res: st.success("✅ 下單、止盈、止損掛單成功！")
+            res = place_futures_order(trade_symbol, final_side, leverage, input_usdt, trade_price, tp_input, sl_input)
+            if res: st.success("✅ 訂單已發送至幣安！")
 
 # --- 7. 對話紀錄 ---
 if "messages" not in st.session_state: st.session_state.messages = []
 for m in st.session_state.messages:
     with st.chat_message(m["role"]): st.markdown(m["content"])
+
+if inp := st.chat_input("詢問有關進場時機的細節..."):
+    st.session_state.messages.append({"role": "user", "content": inp})
+    with st.chat_message("user"): st.markdown(inp)
+    with st.chat_message("assistant"):
+        try:
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel("models/gemini-1.5-flash")
+            r = model.generate_content(inp)
+            st.markdown(r.text)
+            st.session_state.messages.append({"role": "assistant", "content": r.text})
+        except: st.error("對話助手回應失敗")

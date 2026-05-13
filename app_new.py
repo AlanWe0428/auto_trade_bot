@@ -11,9 +11,8 @@ from binance.enums import *
 # --- 1. 頁面配置 ---
 st.set_page_config(page_title="Crypto AI 短線狙擊儀", layout="wide", page_icon="🎯")
 
-# --- 2. 幣安核心功能模組 (針對餘額讀取進行強化) ---
+# --- 2. 幣安核心功能模組 (強化餘額抓取) ---
 def get_binance_client():
-    # 這裡依照先前建議，在本地執行時若 secrets 有問題，改由側邊欄手動輸入或直接讀取
     try:
         api_key = st.secrets.get("BINANCE_API_KEY")
         api_secret = st.secrets.get("BINANCE_API_SECRET")
@@ -28,7 +27,7 @@ def get_futures_balance():
     if not client:
         return "API 未設定"
     try:
-        # 修正：改用 futures_account() 抓取 'availableBalance'，這在合約交易中更準確
+        # 使用 futures_account 獲取 U 本位合約可用餘額
         acc_info = client.futures_account()
         for asset in acc_info.get('assets', []):
             if asset['asset'] == 'USDT':
@@ -48,18 +47,26 @@ def place_futures_order(symbol, side, leverage, usdt_amount, price, tp_price=Non
             symbol=symbol, side=side, type=ORDER_TYPE_LIMIT,
             timeInForce=TIME_IN_FORCE_GTC, quantity=qty, price=str(round(price, 4))
         )
+        # 止盈掛單
         if tp_price and tp_price > 0:
             tp_side = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
-            client.futures_create_order(symbol=symbol, side=tp_side, type=FUTURE_ORDER_TYPE_TAKE_PROFIT_MARKET, stopPrice=str(round(tp_price, 4)), closePosition=True)
+            client.futures_create_order(
+                symbol=symbol, side=tp_side, type=FUTURE_ORDER_TYPE_TAKE_PROFIT_MARKET,
+                stopPrice=str(round(tp_price, 4)), closePosition=True
+            )
+        # 止損掛單
         if sl_price and sl_price > 0:
             sl_side = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
-            client.futures_create_order(symbol=symbol, side=sl_side, type=FUTURE_ORDER_TYPE_STOP_MARKET, stopPrice=str(round(sl_price, 4)), closePosition=True)
+            client.futures_create_order(
+                symbol=symbol, side=sl_side, type=FUTURE_ORDER_TYPE_STOP_MARKET,
+                stopPrice=str(round(sl_price, 4)), closePosition=True
+            )
         return main_order
     except Exception as e:
         st.error(f"下單失敗: {str(e)}")
         return None
 
-# --- 3. 數據處理 (保留原版) ---
+# --- 3. 核心數據處理 (保留原版) ---
 def get_crypto_data(coin_symbol):
     try:
         ticker = f"{coin_symbol}-USD"
@@ -83,7 +90,6 @@ def get_crypto_data(coin_symbol):
 # --- 4. 側邊欄 ---
 with st.sidebar:
     st.header("🎯 狙擊手控制台")
-    # --- 這裡嚴格還原你原本的 Gemini Key 獲取邏輯 ---
     api_key = st.secrets.get("GEMINI_API_KEY") or st.text_input("Gemini API Key", type="password")
     selected_coins = st.multiselect("追蹤幣種", ["BTC", "ETH", "SOL", "BNB", "DOGE", "XRP"], default=["BTC", "ETH", "SOL"])
     st.divider()
@@ -102,11 +108,18 @@ if st.button("🚀 開始掃描短線狙擊機會"):
         try:
             genai.configure(api_key=api_key)
             
-            # --- 關鍵：完全還原你原始成功的模型偵測與連線方式 ---
+            # --- 嚴格還原：您指定的模型連線邏輯 ---
             available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-            target_model = next((m for m in available_models if "gemini-1.5-flash" in m), "models/gemini-1.5-flash")
+            
+            target_model = "models/gemini-1.5-flash"
+            if target_model not in available_models:
+                if "models/gemini-flash-latest" in available_models:
+                    target_model = "models/gemini-flash-latest"
+                else:
+                    target_model = available_models[0] if available_models else "gemini-1.5-flash"
             
             model = genai.GenerativeModel(target_model)
+            
             all_data = {}
             p_bar = st.progress(0)
             for i, coin in enumerate(selected_coins):

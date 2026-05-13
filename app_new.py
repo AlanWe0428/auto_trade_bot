@@ -47,19 +47,19 @@ def place_futures_order(symbol, side, leverage, usdt_amount, price, tp_price=Non
         client.futures_change_leverage(symbol=symbol, leverage=leverage)
         qty = round((usdt_amount * leverage) / price, 3) 
         
-        # 1. 限價單
+        # 1. 限價開倉單
         main_order = client.futures_create_order(
             symbol=symbol, side=side, type=ORDER_TYPE_LIMIT,
             timeInForce=TIME_IN_FORCE_GTC, quantity=qty, price=str(round(price, 4))
         )
-        # 2. 止盈 (市價觸發)
+        # 2. 止盈單 (市價觸發)
         if tp_price and tp_price > 0:
             tp_side = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
             client.futures_create_order(
                 symbol=symbol, side=tp_side, type=FUTURE_ORDER_TYPE_TAKE_PROFIT_MARKET,
                 stopPrice=str(round(tp_price, 4)), closePosition=True
             )
-        # 3. 止損 (市價觸發)
+        # 3. 止損單 (市價觸發)
         if sl_price and sl_price > 0:
             sl_side = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
             client.futures_create_order(
@@ -71,7 +71,7 @@ def place_futures_order(symbol, side, leverage, usdt_amount, price, tp_price=Non
         st.error(f"❌ 幣安下單失敗: {str(e)}")
         return None
 
-# --- 3. 核心數據處理 (還原原版) ---
+# --- 3. 核心數據處理 (完整保留原版指標) ---
 def get_crypto_data(coin_symbol):
     try:
         ticker = f"{coin_symbol}-USD"
@@ -100,7 +100,7 @@ def get_crypto_data(coin_symbol):
         st.error(f"數據抓取錯誤: {str(e)}")
         return None
 
-# --- 4. 側邊欄 ---
+# --- 4. 側邊欄 (還原 6 個選項) ---
 with st.sidebar:
     st.header("🎯 狙擊手控制台")
     api_key = st.secrets.get("GEMINI_API_KEY") or st.text_input("Gemini API Key", type="password")
@@ -118,9 +118,12 @@ with st.sidebar:
         if st.checkbox("7D 支撐壓力", value=True): indicators.append("7日關鍵位")
         if st.checkbox("形態學分析", value=True): indicators.append("形態學辨識")
 
-# --- 5. 主程式 ---
+# --- 5. 主程式初始化 ---
 st.title("🎯 AI 短線高勝率狙擊儀")
 
+# 關鍵修復：初始化 Session State 避免 AttributeError
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 if "last_analysis" not in st.session_state:
     st.session_state.last_analysis = {"symbol": "BTCUSDT", "price": 0.0, "tp": 0.0, "sl": 0.0}
 
@@ -129,6 +132,7 @@ if st.button("🚀 開始掃描短線狙擊機會"):
     else:
         try:
             genai.configure(api_key=api_key)
+            # 原版穩定模型連線方式
             available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
             target_model = next((m for m in available_models if "gemini-1.5-flash" in m), "models/gemini-1.5-flash")
             
@@ -151,13 +155,13 @@ if st.button("🚀 開始掃描短線狙擊機會"):
                 
                 response = model.generate_content(prompt)
                 st.info(response.text)
-                st.session_state.setdefault("messages", []).append({"role":"assistant", "content": response.text})
+                st.session_state.messages.append({"role":"assistant", "content": response.text})
                 
-                # --- 強化版解析 (處理逗號、錢字號) ---
-                def clean_price(text):
-                    if not text: return 0.0
-                    clean = re.sub(r'[^\d.]', '', text) # 只保留數字和小數點
-                    return float(clean) if clean else 0.0
+                # --- 強化版解析 (處理逗號、錢字號、括號) ---
+                def clean_val(t):
+                    if not t: return 0.0
+                    c = re.sub(r'[^\d.]', '', t)
+                    return float(c) if c else 0.0
 
                 text = response.text
                 p_m = re.search(r"進場\s*[:：]?\s*[\$]?\s*([\d,.]+)", text)
@@ -165,12 +169,12 @@ if st.button("🚀 開始掃描短線狙擊機會"):
                 sl_m = re.search(r"止損\s*[:：]?\s*[\$]?\s*([\d,.]+)", text)
                 c_m = re.search(r"💎\s*\[?(\w+)", text)
                 
-                if p_m: st.session_state.last_analysis["price"] = clean_price(p_m.group(1))
-                if tp_m: st.session_state.last_analysis["tp"] = clean_price(tp_m.group(1))
-                if sl_m: st.session_state.last_analysis["sl"] = clean_price(sl_m.group(1))
+                if p_m: st.session_state.last_analysis["price"] = clean_val(p_m.group(1))
+                if tp_m: st.session_state.last_analysis["tp"] = clean_val(tp_m.group(1))
+                if sl_m: st.session_state.last_analysis["sl"] = clean_val(sl_m.group(1))
                 if c_m: st.session_state.last_analysis["symbol"] = c_m.group(1).upper() + "USDT"
                 
-                st.rerun()
+                st.rerun() # 強制刷新以填充欄位
         except Exception as e: st.error(f"分析失敗: {e}")
 
 # --- 6. 幣安下單面板 ---
@@ -204,7 +208,9 @@ with st.container(border=True):
         else:
             final_side = SIDE_BUY if "BUY" in side_opt else SIDE_SELL
             res = place_futures_order(trade_symbol, final_side, leverage, input_usdt, trade_price, tp_input, sl_input)
-            if res: st.success("✅ 訂單與風控掛單已發送！")
+            if res: st.success("✅ 狙擊訂單已發送至幣安！")
 
-for m in st.session_state.messages:
-    with st.chat_message(m["role"]): st.markdown(m["content"])
+# --- 7. 對話紀錄 (加上安全檢查) ---
+if st.session_state.messages:
+    for m in st.session_state.messages:
+        with st.chat_message(m["role"]): st.markdown(m["content"])

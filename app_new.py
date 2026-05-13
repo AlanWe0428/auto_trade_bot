@@ -21,7 +21,9 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # --- 2. 幣安核心功能模組 ---
+
 def get_binance_client():
+    """初始化幣安客戶端"""
     try:
         api_key = st.secrets.get("BINANCE_API_KEY")
         api_secret = st.secrets.get("BINANCE_API_SECRET")
@@ -31,7 +33,7 @@ def get_binance_client():
         return None
 
 def get_futures_balance():
-    """取得合約帳戶可用 USDT 餘額"""
+    """取得 U 本位合約帳戶可用 USDT 餘額"""
     client = get_binance_client()
     if not client: return 0.0
     try:
@@ -44,18 +46,16 @@ def get_futures_balance():
         return 0.0
 
 def place_futures_order(symbol, side, leverage, usdt_amount, price):
-    """下單邏輯：輸入 USDT 金額，自動換算 Qty 並處理精度"""
+    """執行下單：輸入 USDT 金額，自動換算數量並處理精度"""
     client = get_binance_client()
     if not client: return None
     try:
         # 1. 設定槓桿
         client.futures_change_leverage(symbol=symbol, leverage=leverage)
         
-        # 2. 計算數量 (Qty = 保證金 * 槓桿 / 價格)
+        # 2. 計算數量 (Qty = 投入保證金 * 槓桿 / 價格)
         raw_qty = (usdt_amount * leverage) / price
-        
-        # 針對不同幣種做簡易精度處理 (BTC/ETH 通常 3 位, API3/SOL 通常 1-2 位)
-        # 這裡建議使用 round(raw_qty, 2) 作為通用保險
+        # 簡易精度處理：大多數幣種取小數點後 2 位較安全
         qty = round(raw_qty, 2) 
         
         # 3. 執行限價單 (LIMIT)
@@ -72,23 +72,25 @@ def place_futures_order(symbol, side, leverage, usdt_amount, price):
         st.error(f"❌ 幣安下單失敗: {str(e)}")
         return None
 
-# --- 3. 核心數據處理 (原本邏輯) ---
+# --- 3. 數據抓取邏輯 ---
+
 def get_crypto_data(coin_symbol):
+    """抓取市場數據與技術指標"""
     try:
         ticker = f"{coin_symbol}-USD"
         data = yf.download(ticker, period="1mo", interval="1h", progress=False, timeout=15)
         if data.empty: return None
         if isinstance(data.columns, pd.MultiIndex): 
             data.columns = data.columns.get_level_values(0)
+        
         data = data.dropna().astype(float)
-
         data['RSI'] = ta.rsi(data['Close'], length=14)
         data['ATR'] = ta.atr(data['High'], data['Low'], data['Close'], length=14)
+        
         price_trend = data['Close'].tail(20).tolist()
         price_trend_str = ", ".join([f"{p:.2f}" for p in price_trend])
+        
         high_30d, low_30d = float(data['High'].max()), float(data['Low'].min())
-        recent_7d = data.tail(24 * 7)
-        res_7d, sup_7d = float(recent_7d['High'].max()), float(recent_7d['Low'].min())
         latest = data.iloc[-1]
         
         return {
@@ -98,34 +100,14 @@ def get_crypto_data(coin_symbol):
             "atr": float(latest['ATR']),
             "price_trend": price_trend_str,
             "fib_0618": high_30d - 0.618 * (high_30d - low_30d),
-            "res_7d": res_7d, "sup_7d": sup_7d,
             "change": float((latest['Close'] - data.iloc[-2]['Close']) / data.iloc[-2]['Close'] * 100)
         }
     except Exception as e:
         st.error(f"數據抓取錯誤 ({coin_symbol}): {str(e)}")
         return None
 
-# --- 4. 整合狙擊 Prompt ---
-def get_sniper_prompt(all_tech_data, indicators):
-    indicator_text = "、".join(indicators) if indicators else "綜合技術指標"
-    data_content = ""
-    for coin, d in all_tech_data.items():
-        data_content += f"【{coin}】現價:{d['price']:.2f} ({d['change']:.2f}%), RSI:{d['rsi']:.1f}, ATR:{d['atr']:.2f}, 7D支撐:{d['sup_7d']:.2f}\n"
+# --- 4. 側邊欄與模型設定 ---
 
-    return f"""你是一位精通 ICT 與 SMC 的「短線狙擊交易員」。
-    請根據以下數據進行匯流分析：{indicator_text}。
-    數據：{data_content}
-    請輸出格式：
-    💎 **[幣種] 短線狙擊報告**
-    ● **匯流辨識**：[內容]
-    ● **策略評級**：[⭐ 強勢狙擊 / ✅ 觀察等待 / ❌ 放棄]
-    ● **掛單區間**：進場 [數值] | 止盈 [數值] | 止損 [數值]
-    ● **核心理由**：[內容]
-    ---
-    🏆 **今日最優狙擊機會**：[幣種名稱]
-    """
-
-# --- 5. 側邊欄控制 ---
 with st.sidebar:
     st.header("🎯 狙擊手控制台")
     api_key = st.secrets.get("GEMINI_API_KEY") or st.text_input("Gemini API Key", type="password")
@@ -138,70 +120,86 @@ with st.sidebar:
     if st.checkbox("斐波那契匯流", value=True): indicators.append("0.618 關鍵位")
     if st.checkbox("ATR 波動止損", value=True): indicators.append("ATR 動態止損")
 
-# --- 6. 主程式執行 ---
+# --- 5. 主程式邏輯 ---
+
 st.title("🎯 AI 短線高勝率狙擊儀")
 
+# 初始化 Session State
 if "last_analysis" not in st.session_state:
     st.session_state.last_analysis = {"symbol": "BTCUSDT", "price": 0.0}
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
+# 掃描按鈕
 if st.button("🚀 開始掃描短線狙擊機會"):
     if not api_key:
-        st.error("請提供 API Key")
+        st.error("請在 Secrets 或側邊欄提供 Gemini API Key")
     else:
         try:
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel("models/gemini-1.5-flash")
+            
+            # --- 動態模型偵測 (修復 404 錯誤) ---
+            models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+            target_model = next((m for m in models if "gemini-1.5-flash" in m), "models/gemini-1.5-flash")
+            model = genai.GenerativeModel(target_model)
+            
             all_data = {}
             p_bar = st.progress(0)
             for i, coin in enumerate(selected_coins):
-                p_bar.progress((i+1)/len(selected_coins), text=f"正在狙擊 {coin} 盤面...")
+                p_bar.progress((i+1)/len(selected_coins), text=f"正在分析 {coin} 盤面...")
                 res = get_crypto_data(coin)
                 if res: all_data[coin] = res
                 time.sleep(0.5)
 
             if all_data:
-                prompt = get_sniper_prompt(all_data, indicators)
-                response = model.generate_content(prompt)
-                st.info(response.text)
+                # 建立 AI Prompt
+                data_content = ""
+                for c, d in all_data.items():
+                    data_content += f"【{c}】現價:{d['price']:.2f}, RSI:{d['rsi']:.1f}, ATR:{d['atr']:.2f}\n"
                 
-                # 自動解析 AI 點位
-                try:
+                prompt = f"你是一位精通 ICT 的狙擊交易員。數據：{data_content}\n請給出狙擊報告，格式包含：💎 [幣種]、進場 [數值]、止盈、止損。"
+                
+                with st.spinner("AI 正在計算匯流點..."):
+                    response = model.generate_content(prompt)
+                    st.info(response.text)
+                    
+                    # 自動解析建議點位
                     p_match = re.search(r"進場\s*\[?([\d\.]+)", response.text)
                     c_match = re.search(r"💎\s*\**\[?(\w+)", response.text)
                     if p_match: st.session_state.last_analysis["price"] = float(p_match.group(1))
                     if c_match: st.session_state.last_analysis["symbol"] = c_match.group(1).upper() + "USDT"
-                except: pass
-                
-                st.session_state.setdefault("messages", []).append({"role":"assistant", "content": response.text})
+                    
+                    st.session_state.messages.append({"role": "assistant", "content": response.text})
         except Exception as e:
             st.error(f"分析失敗: {str(e)}")
 
-# --- 7. 幣安自動下單面板 ---
+# --- 6. 幣安合約下單面板 ---
+
 st.divider()
 st.subheader("🤖 幣安合約快速執行面板")
 
-# 取得目前餘額
+# 實時餘額
 usdt_balance = get_futures_balance()
 
 with st.container(border=True):
-    c1, c2, c3 = st.columns(3)
-    with c1:
+    col1, col2, col3 = st.columns(3)
+    with col1:
         trade_symbol = st.text_input("下單幣種", value=st.session_state.last_analysis["symbol"])
-    with c2:
+    with col2:
         trade_price = st.number_input("建議點位", value=st.session_state.last_analysis["price"], format="%.4f")
-    with c3:
+    with col3:
         leverage = st.select_slider("槓桿倍數", options=list(range(1, 21)), value=5)
 
-    c4, c5 = st.columns(2)
-    with c4:
+    col4, col5 = st.columns(2)
+    with col4:
         input_usdt = st.number_input("投入保證金 (USDT)", min_value=0.0, step=10.0)
         st.caption(f"💰 合約可用餘額：**{usdt_balance:.2f} USDT**")
-    with c5:
+    with col5:
         side = st.radio("交易方向", ["做多 (BUY)", "做空 (SELL)"], horizontal=True)
 
     if st.button("🔥 執行幣安自動掛單", type="primary"):
         if input_usdt <= 0:
-            st.warning("請輸入預計投入的 USDT 金額")
+            st.warning("請輸入預計投入金額")
         elif input_usdt > usdt_balance:
             st.error("❌ 餘額不足")
         else:
@@ -209,10 +207,9 @@ with st.container(border=True):
             with st.spinner("訂單發送中..."):
                 res = place_futures_order(trade_symbol, order_side, leverage, input_usdt, trade_price)
                 if res:
-                    st.success(f"✅ 下單成功！ID: {res['orderId']}")
+                    st.success(f"✅ 掛單成功！訂單 ID: {res['orderId']}")
                     st.balloons()
 
-# --- 8. 對話區 ---
-if "messages" not in st.session_state: st.session_state.messages = []
+# --- 7. 對話紀錄顯示 ---
 for m in st.session_state.messages:
     with st.chat_message(m["role"]): st.markdown(m["content"])
